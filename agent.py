@@ -5,69 +5,116 @@ from typing import List, Dict, Any
 
 from uap_podcast.models.audio import text_to_ssml, synth, write_master
 from uap_podcast.models.podcast import llm
-from uap_podcast.agents.nexus_agent.utils.state import NEXUS_INTRO, NEXUS_OUTRO, SYSTEM_NEXUS
-from uap_podcast.agents.nexus_agent.utils.nodes import generate_nexus_topic_intro
-from uap_podcast.agents.nexus_agent.utils.tools import ensure_complete_response
+from uap_podcast.agents.stat_agent.utils.state import STAT_INTRO, SYSTEM_STAT
+from uap_podcast.agents.stat_agent.utils.nodes import generate_stat_turn
+from uap_podcast.agents.stat_agent.utils.tools import (
+    ensure_complete_response,
+    vary_opening,
+    add_conversation_dynamics,
+    add_emotional_reactions,
+    clean_repetition,
+)
 
-class NexusAgent:
+class StatAgent:
     """
-    ✅ NexusAgent orchestrates the podcast introduction, topic setup, and closing.
-    It handles:
-      - Speaking the intro and outro
-      - Generating and speaking topic introductions dynamically
-      - Managing the conversation flow for the Nexus role
+    📊 StatAgent manages the statistical integrity agent's part of the podcast.
+    Responsibilities:
+      - Speak Stat's intro
+      - Generate dynamic responses based on Reco's statements & context
+      - Maintain script & audio segments for Stat
     """
 
     def __init__(self):
         self.script_lines: List[str] = []
         self.audio_segments: List[str] = []
         self.conversation_history: List[str] = []
+        self.last_openings: Dict[str, str] = {}
+        self.last_speaker: str = ""
 
     async def speak_intro(self) -> None:
-        """Speak the fixed Nexus introduction."""
-        self.script_lines.append(f"Agent Nexus: {NEXUS_INTRO}")
-        ssml = text_to_ssml(NEXUS_INTRO, "NEXUS")
+        """🎙️ Speak the fixed Stat introduction."""
+        self.script_lines.append(f"Agent Stat: {STAT_INTRO}")
+        ssml = text_to_ssml(STAT_INTRO, "STAT")
         audio = synth(ssml)
         self.audio_segments.append(audio)
 
-    async def speak_topic_intro(self, context: str) -> str:
+    async def generate_turn(
+        self,
+        context: str,
+        nexus_intro: str,
+        reco_response: str,
+        previous_history: List[str],
+        turn_index: int,
+    ) -> str:
         """
-        Dynamically generate and speak the Nexus topic introduction 
-        based on the data context.
+        🧠 Generate a single Stat turn based on:
+          - data context
+          - Nexus topic intro
+          - Reco's previous statement
+          - conversation history
         """
-        print("🎙️ Generating Nexus topic introduction...")
-        topic_intro = await generate_nexus_topic_intro(context)
-        topic_intro = ensure_complete_response(topic_intro)
+        print(f"📊 Generating Stat turn {turn_index + 1}...")
 
-        self.script_lines.append(f"Agent Nexus: {topic_intro}")
-        ssml = text_to_ssml(topic_intro, "NEXUS")
+        stat_prompt = f"""
+        Context: {context}
+
+        Nexus introduced these topics: {nexus_intro}
+
+        Reco just said: {reco_response}
+
+        Previous conversation: {previous_history[-3:] if len(previous_history) >= 3 else 'None'}
+
+        Respond to Reco's point focusing on data integrity and statistical validation.
+        """
+
+        response = await generate_stat_turn(SYSTEM_STAT, stat_prompt)
+
+        # --- Conversation polishing ---
+        response = vary_opening(response, "STAT", self.last_openings)
+        response = add_conversation_dynamics(
+            response, "STAT", self.last_speaker, context, turn_index, previous_history
+        )
+        response = add_emotional_reactions(response, "STAT")
+        response = clean_repetition(response)
+        response = ensure_complete_response(response)
+
+        # Save script + audio
+        self.script_lines.append(f"Agent Stat: {response}")
+        ssml = text_to_ssml(response, "STAT")
         audio = synth(ssml)
         self.audio_segments.append(audio)
-        self.conversation_history.append(f"Nexus: {topic_intro}")
-        return topic_intro
 
-    async def speak_outro(self) -> None:
-        """Speak the fixed Nexus outro."""
-        self.script_lines.append(f"Agent Nexus: {NEXUS_OUTRO}")
-        ssml = text_to_ssml(NEXUS_OUTRO, "NEXUS")
-        audio = synth(ssml)
-        self.audio_segments.append(audio)
+        # Update history
+        self.conversation_history.append(f"Stat: {response}")
+        self.last_speaker = "Stat"
+        return response
 
-    async def generate_podcast(
-        self, context: str, output_prefix: str = "podcast"
+    async def generate_segment(
+        self,
+        context: str,
+        nexus_intro: str,
+        reco_responses: List[str],
+        turns: int = 3,
+        output_prefix: str = "stat_segment",
     ) -> Dict[str, Any]:
         """
-        🎧 Main orchestration method — runs the complete Nexus segment:
+        🎧 Generate the entire Stat segment flow:
           1. Intro
-          2. Dynamic topic introduction
-          3. Outro
-          4. Write audio + script
+          2. Multiple response turns
+          3. Write output audio + script
         """
         await self.speak_intro()
-        await self.speak_topic_intro(context)
-        await self.speak_outro()
 
-        # Final audio output
+        for turn in range(turns):
+            reco_response = (
+                reco_responses[turn] if turn < len(reco_responses) else "[No Reco response provided]"
+            )
+            await self.generate_turn(
+                context, nexus_intro, reco_response, self.conversation_history, turn
+            )
+            time.sleep(0.3)
+
+        # Write audio output
         output_file = f"{output_prefix}.wav"
         write_master(self.audio_segments, output_file)
 
@@ -75,7 +122,7 @@ class NexusAgent:
         script_file = f"{output_prefix}_script.txt"
         Path(script_file).write_text("\n".join(self.script_lines), encoding="utf-8")
 
-        print("✅ Nexus segment generated.")
+        print("✅ Stat segment generated.")
         return {
             "audio_file": output_file,
             "script_file": script_file,
@@ -87,7 +134,20 @@ class NexusAgent:
 if __name__ == "__main__":
     async def _run_demo():
         context = "[Demo] Sample data context loaded..."
-        nexus = NexusAgent()
-        await nexus.generate_podcast(context, output_prefix="nexus_demo")
+        nexus_intro = "[Demo] Sample topic intro..."
+        reco_responses = [
+            "[Demo] Reco suggests using a rolling average to smooth volatility.",
+            "[Demo] Reco recommends investigating queue routing issues.",
+            "[Demo] Reco advises introducing a triage tag for complexity analysis.",
+        ]
+
+        stat = StatAgent()
+        await stat.generate_segment(
+            context,
+            nexus_intro,
+            reco_responses,
+            turns=3,
+            output_prefix="stat_demo"
+        )
 
     asyncio.run(_run_demo())
